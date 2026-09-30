@@ -1,0 +1,27 @@
+name: Self-hosted macOS CI
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.repository.private && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64, heavylane-ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compile and test on Python 3.9
+        run: |
+          python3.9 --version
+          python3.9 -m py_compile bin/heavylane lib/rr_job.py
+          python3.9 -m unittest -v
+      - name: Compile and test on Python 3.12
+        run: |
+          python3.12 --version
+          python3.12 -m py_compile bin/heavylane lib/rr_job.py
+          python3.12 -m unittest -v
+      - run: scripts/scrub_check.sh
+      - run: scripts/scrub_check.sh --history

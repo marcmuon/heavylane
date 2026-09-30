@@ -1,0 +1,9 @@
+{
+  "project": "example-sim",
+  "data": [],
+  "external": [],
+  "exclude": ["outputs"],
+  "env": {"EXAMPLE_WORKERS": "1"},
+  "fetch": ["outputs"],
+  "notes": ["Inspect this config before granting --trust-repo-config."]
+}

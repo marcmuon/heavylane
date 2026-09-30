@@ -1,0 +1,12 @@
+{
+  "project": "example-sim",
+  "roots": [],
+  "trusted_roots": [],
+  "workdir": "",
+  "data": ["data/input.csv"],
+  "external": ["/Users/example/Data/example-sim/reference.csv"],
+  "exclude": ["outputs", "downloads"],
+  "env": {"EXAMPLE_WORKERS": "1"},
+  "fetch": ["outputs/report.json"],
+  "notes": ["Pass --workers 1. Review reports before copying them into the checkout."]
+}

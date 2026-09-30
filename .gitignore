@@ -1,0 +1,7 @@
+hosts.json
+projects/
+.planning/
+.omc/
+__pycache__/
+*.pyc
+.DS_Store

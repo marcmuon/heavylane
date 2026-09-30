@@ -1,0 +1,20 @@
+{
+  "default": "buildbox",
+  "trusted_roots": [],
+  "hosts": {
+    "buildbox": {
+      "ssh": "buildbox",
+      "root": "heavylane",
+      "wake_lan_ip": "192.168.1.50",
+      "path_prefix": "/opt/homebrew/bin:/usr/local/bin",
+      "python": "python3",
+      "mem_limit_gb": 8,
+      "swap_growth_kill_gb": 2,
+      "swap_growth_free_pct": 25,
+      "min_free_pct": 8,
+      "wake_timeout_s": 90,
+      "lease_seconds": 900,
+      "grace_seconds": 600
+    }
+  }
+}
