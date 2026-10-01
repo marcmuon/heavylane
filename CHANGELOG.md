@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `swap_growth_free_pct: 0` disables the swap-growth guard instead of silently
+  reverting to the 25% default.
+- A submit that fails after the snapshot upload removes its half-built job
+  directory on the host; before, nothing could list or clean it.
+
 ## 0.1.0 — 2026-09-29
 
 - Initial release with fresh history and example-only config.

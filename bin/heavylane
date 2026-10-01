@@ -88,9 +88,7 @@ def run(cmd, **kw):
     return subprocess.run(cmd, text=True, capture_output=True, **kw)
 
 
-def build_path(*values):
-    """Drop every empty PATH component, including inside colon-separated prefixes."""
-    return ":".join(part for value in values if value for part in value.split(":") if part)
+build_path = policy.build_path  # one implementation for the laptop and the host
 
 
 def read_config(path):
@@ -421,6 +419,14 @@ class Remote:
         if not job_id or sanitize(job_id) != job_id.lower() or "/" in job_id:
             die(EX_USAGE, "bad job id %r" % job_id)
         return "%s/jobs/%s" % (self.root, job_id)
+
+    def remove_jobdir(self, jobdir):
+        """Best effort, for a submit that failed before job.json existed: without it no
+        command can see or reclaim the directory."""
+        try:
+            self.sh("rm -rf %s" % shlex.quote(jobdir), check=False, timeout=30)
+        except (RemoteError, OSError, subprocess.SubprocessError) as e:
+            say("warning: could not remove %s on %s: %s" % (jobdir, self.alias, e))
 
     def hostinfo(self):
         return json.loads(self.sh(self.tool("hostinfo", self.root), timeout=30).stdout)
@@ -797,75 +803,79 @@ def cmd_submit(a):
 
         job_id = "heavylane-%s-%s-%s" % (cfg["project"], time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(2))
         jobdir = rm.jobdir(job_id)
-        with open(tar_path, "rb") as f:
-            r = subprocess.run(rm.ssh_argv() + ["mkdir -p %s && tar -xzf - -C %s" % (shlex.quote(jobdir), shlex.quote(jobdir))],
-                               stdin=f, capture_output=True)
-        if r.returncode:
-            raise RemoteError("upload failed: %s" % r.stderr.decode(errors="replace").strip(), r.returncode)
-        if bundle:
-            with open(bundle, "rb") as f:
-                r = subprocess.run(rm.ssh_argv() + ["cat > %s" % shlex.quote(jobdir + "/meta/repo.bundle")], stdin=f,
-                                   capture_output=True)
+        try:
+            with open(tar_path, "rb") as f:
+                r = subprocess.run(rm.ssh_argv() + ["mkdir -p %s && tar -xzf - -C %s" % (shlex.quote(jobdir), shlex.quote(jobdir))],
+                                   stdin=f, capture_output=True)
             if r.returncode:
-                raise RemoteError("bundle upload failed", r.returncode)
-            branch = meta.get("git_branch")
-            ref = ("git symbolic-ref HEAD refs/heads/%s && git update-ref HEAD FETCH_HEAD" % shlex.quote(branch)
-                   if branch and branch != "HEAD" else "git update-ref --no-deref HEAD FETCH_HEAD")
-            # History of HEAD with the snapshot as the working tree: code that records the commit
-            # or runs merge-base sees the laptop's commit, dirty exactly where the laptop was.
-            # Files the snapshot left out would show as deleted and mark every run "-dirty":
-            # skip-worktree them so `git status` reflects only the laptop's real changes.
-            rm.sh("cd %s/src && git init -q && git fetch -q ../meta/repo.bundle HEAD && %s && git reset -q"
-                  " && git ls-files --deleted -z | git update-index -z --skip-worktree --stdin"
-                  % (shlex.quote(jobdir), ref), timeout=30)
-            say("git history of %s shipped (%.1f MB bundle)" % (meta["git_head"][:8], os.path.getsize(bundle) / 2**20))
+                raise RemoteError("upload failed: %s" % r.stderr.decode(errors="replace").strip(), r.returncode)
+            if bundle:
+                with open(bundle, "rb") as f:
+                    r = subprocess.run(rm.ssh_argv() + ["cat > %s" % shlex.quote(jobdir + "/meta/repo.bundle")], stdin=f,
+                                       capture_output=True)
+                if r.returncode:
+                    raise RemoteError("bundle upload failed", r.returncode)
+                branch = meta.get("git_branch")
+                ref = ("git symbolic-ref HEAD refs/heads/%s && git update-ref HEAD FETCH_HEAD" % shlex.quote(branch)
+                       if branch and branch != "HEAD" else "git update-ref --no-deref HEAD FETCH_HEAD")
+                # History of HEAD with the snapshot as the working tree: code that records the commit
+                # or runs merge-base sees the laptop's commit, dirty exactly where the laptop was.
+                # Files the snapshot left out would show as deleted and mark every run "-dirty":
+                # skip-worktree them so `git status` reflects only the laptop's real changes.
+                rm.sh("cd %s/src && git init -q && git fetch -q ../meta/repo.bundle HEAD && %s && git reset -q"
+                      " && git ls-files --deleted -z | git update-index -z --skip-worktree --stdin"
+                      % (shlex.quote(jobdir), ref), timeout=30)
+                say("git history of %s shipped (%.1f MB bundle)" % (meta["git_head"][:8], os.path.getsize(bundle) / 2**20))
 
-        if data or external:
-            cache = "%s/cache/%s" % (rm.root, cfg["project"])
-            excludes = rsync_excludes()
-            with RemoteLock(rm, cache + ".lock"):
-                parents = {os.path.dirname("%s/%s" % (cache, d)) for d in data}
-                parents |= {os.path.dirname("%s/external%s" % (cache, e)) for e in external}
-                rm.sh("mkdir -p " + " ".join(shlex.quote(p) for p in sorted(parents)))
-                for d in data:
-                    src, t0 = os.path.join(root, d), time.time()
-                    if os.path.isdir(src):
-                        rm.rsync(src + "/", "%s:%s/%s/" % (rm.alias, cache, d), ["--delete"] + excludes)
-                    else:
-                        rm.rsync(src, "%s:%s/%s" % (rm.alias, cache, d))
-                    say("data %s synced (%.0f s)" % (d, time.time() - t0))
-                for e in external:
-                    t0 = time.time()
-                    if os.path.isdir(e):
-                        rm.rsync(e + "/", "%s:%s/external%s/" % (rm.alias, cache, e), ["-L"] + excludes)
-                    else:
-                        rm.rsync(os.path.realpath(e), "%s:%s/external%s" % (rm.alias, cache, e))
-                    say("external %s synced (%.0f s)" % (e, time.time() - t0))
-                # Each job gets its own copy-on-write view, frozen at submit time.
-                if data:
-                    rm.sh(rm.tool("clone-data", cache, jobdir + "/src", *data), timeout=60)
-                if external:
-                    rm.sh(rm.tool("clone-data", cache + "/external", jobdir + "/external",
-                                  *[e.lstrip("/") for e in external]), timeout=60)
+            if data or external:
+                cache = "%s/cache/%s" % (rm.root, cfg["project"])
+                excludes = rsync_excludes()
+                with RemoteLock(rm, cache + ".lock"):
+                    parents = {os.path.dirname("%s/%s" % (cache, d)) for d in data}
+                    parents |= {os.path.dirname("%s/external%s" % (cache, e)) for e in external}
+                    rm.sh("mkdir -p " + " ".join(shlex.quote(p) for p in sorted(parents)))
+                    for d in data:
+                        src, t0 = os.path.join(root, d), time.time()
+                        if os.path.isdir(src):
+                            rm.rsync(src + "/", "%s:%s/%s/" % (rm.alias, cache, d), ["--delete"] + excludes)
+                        else:
+                            rm.rsync(src, "%s:%s/%s" % (rm.alias, cache, d))
+                        say("data %s synced (%.0f s)" % (d, time.time() - t0))
+                    for e in external:
+                        t0 = time.time()
+                        if os.path.isdir(e):
+                            rm.rsync(e + "/", "%s:%s/external%s/" % (rm.alias, cache, e), ["-L"] + excludes)
+                        else:
+                            rm.rsync(os.path.realpath(e), "%s:%s/external%s" % (rm.alias, cache, e))
+                        say("external %s synced (%.0f s)" % (e, time.time() - t0))
+                    # Each job gets its own copy-on-write view, frozen at submit time.
+                    if data:
+                        rm.sh(rm.tool("clone-data", cache, jobdir + "/src", *data), timeout=60)
+                    if external:
+                        rm.sh(rm.tool("clone-data", cache + "/external", jobdir + "/external",
+                                      *[e.lstrip("/") for e in external]), timeout=60)
 
-        env["GIT_CEILING_DIRECTORIES"] = rm.root + "/jobs"  # never pick up a repo above the job
-        env["HEAVYLANE_JOB_ID"] = job_id
-        if meta["git_head"]:
-            env["HEAVYLANE_GIT_HEAD"] = meta["git_head"]
-        job = {
-            "job_id": job_id, "project": cfg["project"], "label": a.label,
-            "submitted": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "submitted_from": socket.gethostname(),
-            "repo_root": root, "workdir": cfg["workdir"], "rel_cwd": rel_cwd,
-            "config": cfg["_config_path"], "command": command, "setup": setup, "env": env,
-            "data": data, "external": external, "fetch": cfg.get("fetch", []),
-            "remote_root": rm.root, "path_prefix": build_path(h.get("path_prefix", ""), rm.home + "/.local/bin"),
-            **limits,
-            "grace_seconds": int(h.get("grace_seconds", 600)),
-            "snapshot_sha256": meta["snapshot_sha256"], "git_head": meta["git_head"], "git_history": bool(bundle),
-        }
-        rm.sh("cat > %s/job.json && cp %s/bin/rr_job.py %s/" % (
-            shlex.quote(jobdir), shlex.quote(rm.root), shlex.quote(jobdir)),
-              input=json.dumps(job, indent=1, sort_keys=True))
+            env["GIT_CEILING_DIRECTORIES"] = rm.root + "/jobs"  # never pick up a repo above the job
+            env["HEAVYLANE_JOB_ID"] = job_id
+            if meta["git_head"]:
+                env["HEAVYLANE_GIT_HEAD"] = meta["git_head"]
+            job = {
+                "job_id": job_id, "project": cfg["project"], "label": a.label,
+                "submitted": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "submitted_from": socket.gethostname(),
+                "repo_root": root, "workdir": cfg["workdir"], "rel_cwd": rel_cwd,
+                "config": cfg["_config_path"], "command": command, "setup": setup, "env": env,
+                "data": data, "external": external, "fetch": cfg.get("fetch", []),
+                "remote_root": rm.root, "path_prefix": build_path(h.get("path_prefix", ""), rm.home + "/.local/bin"),
+                **limits,
+                "grace_seconds": int(h.get("grace_seconds", 600)),
+                "snapshot_sha256": meta["snapshot_sha256"], "git_head": meta["git_head"], "git_history": bool(bundle),
+            }
+            rm.sh("cat > %s/job.json && cp %s/bin/rr_job.py %s/" % (
+                shlex.quote(jobdir), shlex.quote(rm.root), shlex.quote(jobdir)),
+                  input=json.dumps(job, indent=1, sort_keys=True))
+        except BaseException:
+            rm.remove_jobdir(jobdir)  # nothing on the host could ever list or clean it
+            raise
         launch = "%s %s/rr_job.py run %s%s >> %s/wrapper.log 2>&1" % (
             shlex.quote(rm.py), shlex.quote(jobdir), shlex.quote(jobdir), " --queue" if a.queue else "", shlex.quote(jobdir))
         rm.sh("tmux new-session -d -s heavylane-%s -c %s %s" % (job_id, shlex.quote(jobdir), shlex.quote(launch)))

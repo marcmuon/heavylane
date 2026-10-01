@@ -609,7 +609,8 @@ def cmd_run(jobdir, queue):
         limit_kb = int(float(job.get("mem_limit_gb") or 0) * 2**20)
         swap_kill = float(job.get("swap_growth_kill_gb") or 0)
         min_free = int(job.get("min_free_pct") or 0)
-        swap_gate = int(job.get("swap_growth_free_pct") or 25)
+        swap_gate = job.get("swap_growth_free_pct")
+        swap_gate = 25 if swap_gate is None else int(swap_gate)  # 0 disables the swap-growth guard
         swap0 = mem_before.get("swap_used_gb") or 0.0
         peak_n, last_update, n, kill_reason = 0, 0.0, 0, None
         with open(os.path.join(jobdir, "mem.tsv"), "w") as mem:

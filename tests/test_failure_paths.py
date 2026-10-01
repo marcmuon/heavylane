@@ -239,7 +239,8 @@ os.execv(rsync, [rsync] + sys.argv[1:])
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn('data-cache lock', result.stderr)
         self.assertFalse((self.base / 'transfer-finished').exists())
-        self.assertFalse(list((self.remote_root / 'jobs').glob('*/job.json')))
+        # The half-built job directory goes too: without job.json nothing could reclaim it.
+        self.assertFalse(list((self.remote_root / 'jobs').glob('*')))
 
 
 class HostTelemetry(unittest.TestCase):
