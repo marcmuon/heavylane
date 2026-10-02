@@ -201,7 +201,9 @@ subprocess.Popen(['/bin/bash', '-c', args[-1]], cwd=args[args.index('-c') + 1],
                     contextlib.redirect_stderr(io.StringIO()), self.assertRaises(host.ProcessTableError):
                 host.cmd_run(str(jobdir), False)
             size = heartbeat.stat().st_size
-            time.sleep(0.1)
+            deadline = time.monotonic() + 3
+            while heartbeat.stat().st_size <= size and time.monotonic() < deadline:
+                time.sleep(0.02)
             self.assertGreater(heartbeat.stat().st_size, size, 'detached worker did not survive')
             result = self.invoke('fetch', job_id, '--dest', str(self.base / 'results'))
             self.assertNotEqual(result.returncode, 0, result.stdout)
