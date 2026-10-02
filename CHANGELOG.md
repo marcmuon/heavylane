@@ -4,8 +4,9 @@
 
 - `swap_growth_free_pct: 0` disables the swap-growth guard instead of silently
   reverting to the 25% default.
-- A submit that fails after the snapshot upload removes its half-built job
-  directory on the host; before, nothing could list or clean it.
+- Failed submits remove only their own half-built job directory and warn if
+  cleanup fails. A colliding job ID is refused, preserving the existing job
+  and its results.
 
 ## 0.1.0 — 2026-09-29
 

@@ -420,11 +420,16 @@ class Remote:
             die(EX_USAGE, "bad job id %r" % job_id)
         return "%s/jobs/%s" % (self.root, job_id)
 
-    def remove_jobdir(self, jobdir):
-        """Best effort, for a submit that failed before job.json existed: without it no
-        command can see or reclaim the directory."""
+    def remove_jobdir(self, jobdir, owner_token):
+        """Best-effort cleanup of a directory reserved by this failed submit."""
+        path = shlex.quote(jobdir)
+        owner = shlex.quote(jobdir + "/.submit-owner")
+        script = ("if [ ! -e %s ] && [ ! -L %s ]; then exit 0; fi; "
+                  "if [ -L %s ] || [ \"$(cat %s 2>/dev/null)\" != %s ]; then "
+                  "echo 'submit ownership unconfirmed; leaving directory in place' >&2; exit 78; fi; "
+                  "rm -rf -- %s") % (path, path, path, owner, shlex.quote(owner_token), path)
         try:
-            self.sh("rm -rf %s" % shlex.quote(jobdir), check=False, timeout=30)
+            self.sh(script, timeout=30)
         except (RemoteError, OSError, subprocess.SubprocessError) as e:
             say("warning: could not remove %s on %s: %s" % (jobdir, self.alias, e))
 
@@ -803,10 +808,13 @@ def cmd_submit(a):
 
         job_id = "heavylane-%s-%s-%s" % (cfg["project"], time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(2))
         jobdir = rm.jobdir(job_id)
+        owner_token = secrets.token_hex(16)
+        reserve = "mkdir -p %s && mkdir %s && printf '%%s\\n' %s > %s && tar -xzf - -C %s" % (
+            shlex.quote(os.path.dirname(jobdir)), shlex.quote(jobdir), shlex.quote(owner_token),
+            shlex.quote(jobdir + "/.submit-owner"), shlex.quote(jobdir))
         try:
             with open(tar_path, "rb") as f:
-                r = subprocess.run(rm.ssh_argv() + ["mkdir -p %s && tar -xzf - -C %s" % (shlex.quote(jobdir), shlex.quote(jobdir))],
-                                   stdin=f, capture_output=True)
+                r = subprocess.run(rm.ssh_argv() + [reserve], stdin=f, capture_output=True)
             if r.returncode:
                 raise RemoteError("upload failed: %s" % r.stderr.decode(errors="replace").strip(), r.returncode)
             if bundle:
@@ -874,7 +882,7 @@ def cmd_submit(a):
                 shlex.quote(jobdir), shlex.quote(rm.root), shlex.quote(jobdir)),
                   input=json.dumps(job, indent=1, sort_keys=True))
         except BaseException:
-            rm.remove_jobdir(jobdir)  # nothing on the host could ever list or clean it
+            rm.remove_jobdir(jobdir, owner_token)
             raise
         launch = "%s %s/rr_job.py run %s%s >> %s/wrapper.log 2>&1" % (
             shlex.quote(rm.py), shlex.quote(jobdir), shlex.quote(jobdir), " --queue" if a.queue else "", shlex.quote(jobdir))

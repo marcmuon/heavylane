@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.test_heavylane import ROOT, host, write_json
+from tests.test_heavylane import ROOT, cli, host, write_json
 
 
 class FailurePaths(unittest.TestCase):
@@ -241,6 +241,72 @@ os.execv(rsync, [rsync] + sys.argv[1:])
         self.assertFalse((self.base / 'transfer-finished').exists())
         # The half-built job directory goes too: without job.json nothing could reclaim it.
         self.assertFalse(list((self.remote_root / 'jobs').glob('*')))
+
+    def test_submit_collision_preserves_the_existing_job_and_results(self):
+        job_id = 'heavylane-example-sim-20000101-000000-beef'
+        jobdir = self.remote_root / 'jobs' / job_id
+        write_json(jobdir / 'job.json', {'project': 'example-sim', 'job_id': job_id})
+        write_json(jobdir / 'status.json', {'state': 'done', 'exit_code': 0})
+        (jobdir / 'result.txt').write_text('previous completed result\n')
+        (jobdir / '.submit-owner').write_text('previous-submission\n')
+        expected = {path.name: path.read_bytes() for path in jobdir.iterdir()}
+        sibling = jobdir.parent / 'unrelated-job'
+        sibling.mkdir()
+        (sibling / 'keep.txt').write_text('unrelated result\n')
+        (self.repo / 'inputs').mkdir()
+        (self.repo / 'inputs/value.csv').write_text('42\n')
+        self.install_stub('rsync', 'import sys; print("synthetic failed transfer", file=sys.stderr); sys.exit(1)\n')
+        real_strftime = time.strftime
+
+        def fixed_stamp(fmt, *args):
+            return '20000101-000000' if fmt == '%Y%m%d-%H%M%S' else real_strftime(fmt, *args)
+
+        original_cwd = os.getcwd()
+        diagnostic = io.StringIO()
+        try:
+            os.chdir(self.repo)
+            with mock.patch.dict(os.environ, self.environment, clear=True), \
+                    mock.patch.multiple(cli, HOSTS_FILE=str(self.hosts), PROJECTS_DIR=str(self.projects),
+                                        HOME=str(self.home), STATE_DIR=str(self.home / '.local/share/heavylane')), \
+                    mock.patch.object(cli.secrets, 'token_hex', side_effect=lambda n: 'beef' if n == 2 else 'a' * 32), \
+                    mock.patch.object(cli.time, 'strftime', side_effect=fixed_stamp), \
+                    contextlib.redirect_stderr(diagnostic), self.assertRaises(SystemExit) as stopped:
+                cli.main(['submit', '--queue', '--data', 'inputs', '--', 'echo', 'ready'])
+        finally:
+            os.chdir(original_cwd)
+        self.assertEqual(stopped.exception.code, 70, diagnostic.getvalue())
+        self.assertTrue(jobdir.exists(), 'failed submit deleted an existing job')
+        observed = {path.relative_to(jobdir).as_posix(): path.read_bytes()
+                    for path in jobdir.rglob('*') if path.is_file()}
+        self.assertEqual(observed, expected)
+        self.assertEqual((sibling / 'keep.txt').read_text(), 'unrelated result\n')
+        self.assertNotIn('tmux new-session', (self.base / 'calls.log').read_text())
+
+    def test_submit_reports_failed_cleanup_and_preserves_the_transfer_error(self):
+        parent = self.remote_root / 'jobs'
+        parent.mkdir()
+        self.addCleanup(lambda: parent.chmod(0o700))
+        sibling = parent / 'unrelated-job'
+        sibling.mkdir()
+        (sibling / 'keep.txt').write_text('unrelated result\n')
+        (self.repo / 'inputs').mkdir()
+        (self.repo / 'inputs/value.csv').write_text('42\n')
+        self.install_stub('rsync', '''
+import os, pathlib, sys
+pathlib.Path(os.environ['LOCAL_DENY_REMOVE_PARENT']).chmod(0o500)
+print('synthetic failed transfer', file=sys.stderr)
+raise SystemExit(1)
+''')
+        result = self.invoke('submit', '--queue', '--data', 'inputs', '--', 'echo', 'ready',
+                             extra_env={'LOCAL_DENY_REMOVE_PARENT': str(parent)})
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn('synthetic failed transfer', result.stderr)
+        self.assertIn('warning: could not remove', result.stderr)
+        remaining = [path for path in parent.iterdir() if path != sibling]
+        self.assertEqual(len(remaining), 1)
+        self.assertFalse((remaining[0] / 'job.json').exists())
+        self.assertEqual((sibling / 'keep.txt').read_text(), 'unrelated result\n')
+        self.assertNotIn('tmux new-session', (self.base / 'calls.log').read_text())
 
 
 class HostTelemetry(unittest.TestCase):
